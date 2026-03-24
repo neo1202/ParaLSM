@@ -389,7 +389,7 @@
     <!-- ──── OVERVIEW ──── -->
     <div class="tab-panel active" id="overview">
       <div class="prose">
-        <p>We build an in-memory LSM-Tree key-value store and parallelize it across three levels: GPU-accelerated compaction (CUDA merge path), multi-threaded concurrent operations (OpenMP), and SIMD-accelerated key comparisons (AVX2). By keeping all data in memory, we eliminate disk I/O variability and focus on characterizing the speedup contribution of each technique under different workloads.</p>
+        <p>We build an in-memory LSM-Tree key-value store with Size-Tiered compaction and parallelize it across multiple levels: GPU-accelerated compaction via CUDA merge path with chunk-based pipelining, multi-threaded concurrent operations via OpenMP task scheduling, and (stretch) SIMD-accelerated key comparisons. Size-Tiered compaction produces exponentially growing SSTables ideal for GPU throughput. By keeping all data in memory with pre-allocated pools, we eliminate I/O and allocation noise to focus on characterizing pure computational parallelism.</p>
       </div>
 
       <div class="overview-grid">
@@ -421,23 +421,30 @@
         <div class="card-label" style="margin-bottom: 0.75rem;">System Architecture</div>
 <pre>
                  ┌──────────────────────────────────────────┐
-   Requests      │              CPU (8 cores)               │
+   Requests      │        CPU (8 cores) — OpenMP tasks       │
   ───────────►   │                                          │
-                 │  Core 0-5: OpenMP thread pool             │
+                 │  Task pool (dynamic scheduling):          │
                  │    ├── get(key) ──► version snapshot      │
                  │    │                 ├── check memtable   │
                  │    │                 └── check L0..Ln     │
-                 │    └── put(key,val) ──► active memtable   │
+                 │    ├── put(key,val) ──► active memtable   │
+                 │    ├── flush task (memtable → SSTable)    │
+                 │    └── compaction dispatch ───────────────┼──► GPU
                  │                                          │
-                 │  Core 6: flush thread (double buffering)  │
-                 │  Core 7: compaction dispatcher ───────────┼──► GPU
+                 │  Pre-allocated host memory pool           │
+                 │  Pinned memory (cudaMallocHost)           │
                  └──────────────────────────────────────────┘
                                                      │
                  ┌──────────────────────────────────────────┐
-                 │             GPU (RTX 2080)                │
-                 │  Stream 0: merge path kernel (job A)      │
-                 │  Stream 1: merge path kernel (job B)      │
-                 │  Stream 2: overlapped data transfer       │
+                 │   GPU (RTX 2080) — Chunk-based Pipeline   │
+                 │                                          │
+                 │  Cascaded 2-way merge (size-tiered):      │
+                 │    Stream 0: merge A+B (chunk pipeline)   │
+                 │    Stream 1: merge C+D (chunk pipeline)   │
+                 │    Stream 2: merge AB+CD                  │
+                 │                                          │
+                 │  Each stream: overlap H2D / Kernel / D2H  │
+                 │  Pre-allocated device memory pool          │
                  └──────────────────────────────────────────┘
 </pre>
       </div>
@@ -455,17 +462,17 @@
           <tbody>
             <tr>
               <td style="white-space:nowrap;">Week 1 <span style="color:var(--text-dim); font-size:0.8rem;">(3/23–3/29)</span></td>
-              <td>Serial LSM-Tree baseline + proposal</td>
+              <td>Serial LSM-Tree baseline (size-tiered) + memory pools + proposal</td>
               <td><span class="status wip">in progress</span></td>
             </tr>
             <tr>
               <td style="white-space:nowrap;">Week 2 <span style="color:var(--text-dim); font-size:0.8rem;">(3/30–4/5)</span></td>
-              <td>OpenMP concurrency + benchmark framework</td>
+              <td>OpenMP task concurrency + version snapshot + benchmark framework</td>
               <td><span class="status todo">todo</span></td>
             </tr>
             <tr>
               <td style="white-space:nowrap;">Week 3 <span style="color:var(--text-dim); font-size:0.8rem;">(4/6–4/12)</span></td>
-              <td>CUDA merge path + SIMD key comparison</td>
+              <td>CUDA merge path + pinned memory pipeline + cascaded merge</td>
               <td><span class="status todo">todo</span></td>
             </tr>
             <tr>
@@ -475,7 +482,7 @@
             </tr>
             <tr>
               <td style="white-space:nowrap;">Week 5-6 <span style="color:var(--text-dim); font-size:0.8rem;">(4/20–4/30)</span></td>
-              <td>Full benchmarks + final report + poster</td>
+              <td>Full benchmarks + stretch goals + final report + poster</td>
               <td><span class="status todo">todo</span></td>
             </tr>
           </tbody>
@@ -488,7 +495,7 @@
       <div class="prose">
 
         <h2>Summary</h2>
-        <p>We will build an in-memory LSM-Tree key-value store and parallelize it across three levels: GPU-accelerated compaction via CUDA merge path, multi-threaded concurrent operations via OpenMP, and SIMD-accelerated key comparisons via AVX2. By keeping all data in memory, we eliminate disk I/O variability and isolate the computational parallelism of a real storage engine's critical path. Our primary goal is to characterize the speedup contribution of each parallelization technique under different workload patterns.</p>
+        <p>We will build an in-memory LSM-Tree key-value store using <strong>Size-Tiered Compaction</strong> and parallelize it at two primary levels: GPU-accelerated compaction via CUDA merge path (two-phase shared memory algorithm) with chunk-based pipelining using Co-rank partitioning, and multi-threaded concurrent operations via OpenMP task scheduling. Size-Tiered compaction produces exponentially growing SSTables (multi-GB at deeper levels), perfectly matching the high-throughput, bulk-synchronous nature of GPUs. Cascaded 2-way merges across CUDA streams break the K-way merge serial dependency. By keeping all data in pre-allocated memory pools, we eliminate I/O and allocation noise to isolate pure computational parallelism. Our primary goal is to characterize the speedup contribution of each parallelization technique under different workload patterns.</p>
 
         <h2>Background</h2>
         <h3>What is an LSM-Tree?</h3>
@@ -496,24 +503,33 @@
 
         <p><strong>Write path:</strong> All <code>put(key, value)</code> operations insert into a sorted in-memory structure (the <em>active memtable</em>). When the memtable reaches a size threshold, it freezes into an <em>immutable memtable</em>, a new active memtable is created, and a background thread flushes the immutable memtable as a sorted array ("SSTable") into Level 0.</p>
 
-        <p><strong>Compaction:</strong> SSTables accumulate across levels (L0, L1, L2, ...), where each level's capacity is ~10x the previous. When a level exceeds its limit, selected SSTables are merged with overlapping SSTables in the next level via sorted merge. This is the most compute-intensive operation.</p>
+        <p><strong>Size-Tiered Compaction:</strong> We adopt Size-Tiered compaction (as in Cassandra) over Leveled compaction (as in RocksDB). Each level accumulates <em>N</em> similarly-sized SSTables (e.g., 4); when a level is full, all SSTables are merged into a single larger SSTable at the next level. SSTable sizes grow exponentially — Level 2 can reach several GB. This choice inherently generates exponentially growing, large-scale sequential merge tasks, perfectly matching the high-throughput, bulk-synchronous processing nature of GPUs. By contrast, Leveled compaction's small, fragmented merge jobs (tens of MB each) would be dominated by PCIe transfer latency, negating any GPU advantage.</p>
+
+        <p><strong>Cascaded 2-way merge:</strong> Size-Tiered compaction naturally requires K-way merge (e.g., merging 4 SSTables). A naive sequential K-way merge creates a long serial dependency chain: merge A+B, then AB+C, then ABC+D. Instead, we decompose it into a <strong>cascaded binary merge tree</strong> that breaks this serial dependency: merge A+B on CUDA Stream 0 and C+D on Stream 1 <em>in parallel</em>, then merge the two results AB+CD. This reduces the critical path from 3 sequential merges to 2 levels (log<sub>2</sub>K), and reuses a single well-optimized 2-way merge path kernel throughout.</p>
 
         <p><strong>Read path:</strong> A <code>get(key)</code> searches the active memtable, then the immutable memtable, then L0 SSTables (newest first), then deeper levels via binary search. The first match found is the most recent value.</p>
 
+        <h3>GPU Merge Path Algorithm</h3>
+        <p>Our CUDA merge kernel uses the Merge Path algorithm [1] with a two-phase approach to maximize GPU memory throughput:</p>
+        <p><strong>Phase 1 — Coarse-grained partitioning (Global Memory):</strong> Each CUDA block is responsible for producing a fixed-size segment (e.g., 1024 elements) of the merged output. Block <em>i</em>'s first thread performs a binary search along the <em>i</em>-th cross-diagonal of the merge matrix to find the partition boundary — the exact (a<sub>i</sub>, b<sub>i</sub>) positions in both input arrays where this block's work begins. This is O(log N) per block.</p>
+        <p><strong>Phase 2 — Fine-grained merging (Shared Memory):</strong> All threads in the block cooperatively load their input segments from Global Memory into Shared Memory (coalesced reads). Each thread then performs a local merge path binary search within Shared Memory to determine its individual output elements, and writes the merged result back to Shared Memory. Finally, all threads cooperatively write the sorted segment back to Global Memory (coalesced writes). Operating in Shared Memory avoids the latency of repeated Global Memory accesses and enables coalesced access patterns throughout.</p>
+
         <h3>Why is this suitable for parallelism?</h3>
-        <p>Compaction is essentially a multi-way merge of large sorted arrays — a highly data-parallel operation. Reads are independent across levels and across requests. Flush, compaction, and request serving can be pipelined across CPU cores and GPU simultaneously. The immutability of SSTables means most reads are conflict-free.</p>
+        <p>Compaction is essentially a multi-way merge of large sorted arrays — a highly data-parallel operation. With Size-Tiered compaction, the merge inputs at deeper levels reach GB scale, providing enough data to saturate GPU compute and amortize PCIe transfer costs. Reads are independent across levels and across requests. Flush, compaction, and request serving can be pipelined across CPU cores and GPU simultaneously. The immutability of SSTables means most reads are conflict-free.</p>
 
         <h3>In-Memory Design</h3>
-        <p>Our implementation keeps all data in memory: SSTables are <code>std::vector&lt;KeyValue&gt;</code> rather than on-disk files. "Flush" copies sorted data from memtable to a vector; "compaction" merges vectors. This eliminates disk I/O as a confounding variable and lets us measure pure computational parallelism.</p>
+        <p>Our implementation keeps all data in memory: SSTables are stored in pre-allocated memory pools rather than on-disk files. "Flush" copies sorted data from memtable into a pool buffer; "compaction" merges buffers. GPU-side memory is also pre-allocated at initialization to avoid costly <code>cudaMalloc</code> during runtime. This eliminates both disk I/O variability and memory allocation overhead, letting us measure pure computational parallelism.</p>
 
         <h2>The Challenge</h2>
         <p><strong>Workload characteristics:</strong> Compaction involves merging large sorted arrays. Serial merge is inherently sequential (each output depends on the previous comparison), requiring algorithmic restructuring (merge path) to parallelize. Memory access patterns differ across operations: compaction is sequential (good locality), point lookups are random (poor locality), and concurrent operations contend for shared metadata.</p>
 
-        <p><strong>System-level concurrency:</strong> Background compaction modifies the level structure (replacing old SSTables with merged ones) while foreground threads read from those same SSTables. We address this with version-based snapshot isolation: each reader captures an atomic snapshot of the current level layout before querying. Compaction atomically swaps in a new version via <code>shared_ptr</code> + <code>atomic_store</code>. Old versions remain valid until all readers release them.</p>
+        <p><strong>PCIe transfer bottleneck:</strong> On RTX 2080 (PCIe Gen3 x16, ~15.75 GB/s theoretical), transferring a 1 GB merge job to GPU and back takes ~127 ms in transfer time alone, while the merge kernel may finish in single-digit ms. Naive "send all, compute, receive all" will be slower than CPU. We address this with <strong>chunk-based pipelining</strong>: the CPU first performs a fast O(log N) <em>Co-rank binary search</em> (merge path partition) to determine, for each fixed-size output chunk, the variable-sized input boundaries in both sorted arrays. Then, multiple CUDA streams concurrently handle the variable-sized Host-to-Device input transfers, kernel executions, and fixed-sized Device-to-Host output transfers, all using pinned memory (<code>cudaMallocHost</code>) to enable <code>cudaMemcpyAsync</code>. This overlaps transfer and compute to hide PCIe latency.</p>
 
-        <p><strong>GPU offloading tradeoffs:</strong> For small SSTables, host-device transfer time dominates kernel execution time, making GPU slower than CPU. Characterizing this crossover point and implementing adaptive offloading is a key challenge.</p>
+        <p><strong>System-level concurrency:</strong> Background compaction modifies the level structure (replacing old SSTables with merged ones) while foreground threads read from those same SSTables. We address this with version-based snapshot isolation: each reader captures an atomic snapshot of the current level layout before querying. Compaction atomically swaps in a new version via <code>shared_ptr</code> + <code>atomic_store</code>. Old versions remain valid until all readers release them. Note: concurrent <code>shared_ptr</code> read/write requires <code>std::atomic&lt;std::shared_ptr&gt;</code> (C++20) to be safe; we will profile reference-count contention and consider epoch-based reclamation (EBR) if it becomes a bottleneck.</p>
 
-        <p><strong>Load imbalance:</strong> In leveled compaction, the amount of work per compaction job varies significantly depending on key range overlap between levels. Naive static assignment may leave some threads idle while others are overloaded.</p>
+        <p><strong>GPU offloading tradeoffs:</strong> For small SSTables, host-device transfer time dominates kernel execution time, making GPU slower than CPU even with pipelining. Characterizing this crossover point and implementing adaptive offloading is a key challenge.</p>
+
+        <p><strong>Memory allocation overhead:</strong> Frequent allocation of multi-GB buffers for merge outputs causes OS page faults and <code>cudaMalloc</code> overhead that can mask parallelism gains. We use pre-allocated memory pools on both host and device, reusing buffers across compaction jobs.</p>
 
         <h2>Resources</h2>
         <p><strong>Hardware:</strong> GHC machines — Intel i7-9700 (8 cores), NVIDIA RTX 2080 GPU, 16 GB RAM, AVX2 support. PSC machines if needed for scalability experiments.</p>
@@ -523,30 +539,30 @@
         <h3>References</h3>
         <p>[1] Odeh, Green, Miklau. "Merge Path — A Visually Intuitive Approach to Parallel Merging." IEEE IPDPS, 2012.<br>
         [2] O'Neil et al. "The Log-Structured Merge-Tree (LSM-Tree)." Acta Informatica, 1996.<br>
-        [3] Dong et al. "Optimizing Space Amplification in RocksDB." CIDR, 2017.<br>
+        [3] Dong et al. "Optimizing Space Amplification in RocksDB." CIDR, 2017. (Leveled vs Size-Tiered tradeoffs)<br>
         [4] Cooper et al. "Benchmarking Cloud Serving Systems with YCSB." SoCC, 2010.</p>
 
         <h2>Goals and Deliverables</h2>
         <h3>Plan to Achieve (MVP)</h3>
         <ol>
-          <li><strong>Serial baseline:</strong> Complete in-memory LSM-Tree with <code>put</code>, <code>get</code>, <code>scan</code>, leveled compaction, and correctness tests.</li>
-          <li><strong>CUDA merge path:</strong> GPU-accelerated two-way sorted merge for compaction. Micro-benchmark comparing serial vs CUDA merge across input sizes (100K–50M entries), with time breakdown into transfer, kernel, and transfer back.</li>
-          <li><strong>OpenMP concurrent operations:</strong> Thread pool serving parallel <code>get</code>/<code>put</code> requests via work queue. Pipelined flush and compaction in background threads.</li>
-          <li><strong>Version-based concurrency control:</strong> Atomic version snapshot using <code>shared_ptr</code> + <code>atomic_store</code>, ensuring readers are never blocked by compaction.</li>
+          <li><strong>Serial baseline:</strong> Complete in-memory LSM-Tree with <code>put</code>, <code>get</code>, <code>scan</code>, size-tiered compaction, memory pools, and correctness tests.</li>
+          <li><strong>CUDA merge path with pipelining:</strong> GPU-accelerated two-way sorted merge using the two-phase Merge Path algorithm (coarse-grained partitioning in Global Memory, fine-grained merging in Shared Memory). Chunk-based pipeline: CPU performs Co-rank partitioning to determine variable-sized input boundaries, then multiple CUDA streams overlap H2D transfer, kernel execution, and D2H transfer using pinned memory (<code>cudaMallocHost</code>). Pre-allocated device memory pool. Micro-benchmark comparing serial vs CUDA merge across input sizes (1M–50M entries), with time breakdown into transfer, kernel, and overlap efficiency.</li>
+          <li><strong>Cascaded 2-way merge:</strong> Decompose size-tiered K-way compaction into parallel 2-way merges across CUDA streams (e.g., A+B on Stream 0, C+D on Stream 1, then AB+CD).</li>
+          <li><strong>OpenMP concurrent operations:</strong> Thread pool with dynamic task scheduling (not static core pinning) serving parallel <code>get</code>/<code>put</code> requests. Background flush and compaction dispatched as OpenMP tasks, allowing the runtime to balance load across cores based on queue depth.</li>
+          <li><strong>Version-based concurrency control:</strong> Atomic version snapshot using <code>std::atomic&lt;std::shared_ptr&gt;</code> (C++20), ensuring readers are never blocked by compaction.</li>
           <li><strong>End-to-end evaluation:</strong> YCSB-style workloads (write-heavy, read-heavy, mixed) comparing serial vs parallel throughput. Speedup analysis with Amdahl's Law breakdown.</li>
         </ol>
 
         <h3>Hope to Achieve (Stretch Goals)</h3>
-        <ol start="6">
-          <li>Adaptive CPU/GPU compaction: runtime offloading decision based on SSTable size.</li>
-          <li>SIMD key comparison (AVX2) in merge inner loop and binary search.</li>
-          <li>Multi-way merge on GPU for L0 compaction (k-way via CUDA streams).</li>
-          <li>Software prefetching for level traversal and merge operations.</li>
-          <li>CUDA streams for overlapping data transfer with kernel execution.</li>
+        <ol start="7">
+          <li>Adaptive CPU/GPU compaction: runtime offloading decision based on SSTable size, with CPU-GPU co-execution for large compactions (e.g., 80% GPU + 20% CPU OpenMP merge in parallel).</li>
+          <li>SIMD key comparison (AVX2) with Eytzinger layout for cache-friendly binary search, or N-ary search using AVX2 to compare 4 keys per SIMD instruction.</li>
+          <li>Epoch-based reclamation (EBR) replacing <code>shared_ptr</code> reference counting to eliminate cache-line contention under high concurrency.</li>
+          <li>Sharded memtable: partition active memtable by key hash across per-thread buffers for lock-free parallel writes.</li>
         </ol>
 
         <h3>Fallback Plan</h3>
-        <p>If GPU merge path proves too complex, we fall back to OpenMP-only parallelism: concurrent reads, CPU-parallel merge using OpenMP threads with binary-search partitioning, and pipelined flush. This still covers multiple 15-418 topics (work distribution, synchronization, locality) and provides meaningful speedup analysis.</p>
+        <p>If GPU merge path with pipelining proves too complex, we fall back to OpenMP-only parallelism: concurrent reads, CPU-parallel merge using OpenMP threads with merge-path partitioning, and pipelined flush. This still covers multiple 15-418 topics (work distribution, synchronization, locality, memory hierarchy) and provides meaningful speedup analysis.</p>
 
         <h2>Platform Choice</h2>
         <p>GHC machines provide the combination of multi-core CPU, NVIDIA GPU, and AVX2 support needed to explore all three levels of parallelism. We chose C++ for low-level control over memory layout and SIMD intrinsics. We use OpenMP over MPI because our workload is shared-memory, and CUDA for GPU compute with nvprof/nsight for profiling.</p>
@@ -556,9 +572,10 @@
         <table>
           <thead><tr><th>Benchmark</th><th>Configurations</th><th>Key Metric</th></tr></thead>
           <tbody>
-            <tr><td>Sorted merge</td><td>Serial vs OpenMP (2,4,8 threads) vs CUDA, n = 100K–50M</td><td>Speedup, GPU time breakdown</td></tr>
-            <tr><td>Point lookup</td><td>1–16 threads, scalar vs SIMD binary search</td><td>Throughput (lookups/sec)</td></tr>
-            <tr><td>Key comparison</td><td>Scalar vs AVX2, key sizes 8B/16B/32B</td><td>Comparisons/sec</td></tr>
+            <tr><td>Sorted merge</td><td>Serial vs OpenMP (2,4,8 threads) vs CUDA (naive vs chunk-pipeline), n = 1M–50M</td><td>Speedup, H2D/kernel/D2H breakdown, overlap efficiency</td></tr>
+            <tr><td>Cascaded merge</td><td>2-way sequential vs 2-way cascaded across streams (4 inputs)</td><td>Speedup, stream utilization</td></tr>
+            <tr><td>Point lookup</td><td>1–8 threads, varying SSTable count and depth</td><td>Throughput (lookups/sec)</td></tr>
+            <tr><td>Key comparison (stretch)</td><td>Scalar vs AVX2/Eytzinger, key sizes 8B/16B/32B</td><td>Comparisons/sec</td></tr>
           </tbody>
         </table>
 
@@ -577,11 +594,11 @@
         <table>
           <thead><tr><th>Week</th><th>Dates</th><th>Tasks</th></tr></thead>
           <tbody>
-            <tr><td>1</td><td>3/23–3/29</td><td>Serial LSM-Tree: memtable, SSTable, leveled compaction, put/get/scan. Correctness tests. Submit proposal.</td></tr>
-            <tr><td>2</td><td>3/30–4/5</td><td>OpenMP thread pool + work queue. Background flush with double buffering. Version snapshot. Benchmark framework.</td></tr>
-            <tr><td>3</td><td>4/6–4/12</td><td>CUDA merge path kernel. Host-device transfer pipeline. Merge micro-benchmark. Begin SIMD.</td></tr>
-            <tr><td>4</td><td>4/13–4/19</td><td>Milestone report (due 4/14). Profile with nvprof/perf. Adaptive CPU/GPU offloading.</td></tr>
-            <tr><td>5–6</td><td>4/20–4/30</td><td>Full macro-benchmark suite. Speedup curves. Final report + poster.</td></tr>
+            <tr><td>1</td><td>3/23–3/29</td><td>Serial LSM-Tree: memtable, SSTable, size-tiered compaction, put/get/scan. Host &amp; device memory pools. Correctness tests. Submit proposal.</td></tr>
+            <tr><td>2</td><td>3/30–4/5</td><td>OpenMP task-based concurrency. Background flush (simple global lock for version swap). Version snapshot with <code>atomic&lt;shared_ptr&gt;</code>. Benchmark framework (YCSB-style driver).</td></tr>
+            <tr><td>3</td><td>4/6–4/12</td><td>CUDA merge path kernel. Pinned memory + chunk-based 3-stream pipeline (transfer-in / compute / transfer-out overlap). Merge micro-benchmark with time breakdown. Cascaded 2-way merge across streams.</td></tr>
+            <tr><td>4</td><td>4/13–4/19</td><td>Milestone report (due 4/14). Profile with nvprof/perf. Adaptive CPU/GPU offloading threshold. Begin stretch goals if ahead of schedule.</td></tr>
+            <tr><td>5–6</td><td>4/20–4/30</td><td>Full macro-benchmark suite. Speedup curves. Stretch goals (SIMD, EBR, co-execution). Final report + poster.</td></tr>
           </tbody>
         </table>
       </div>
