@@ -403,7 +403,7 @@
           <div class="card-label">Platform</div>
           <div class="card-value">
             GHC machines<br>
-            <span style="color: var(--text-dim); font-size: 0.85rem;">i7-9700 (8 cores) · RTX 2080 · 16 GB RAM</span>
+            <span style="color: var(--text-dim); font-size: 0.85rem;">GHC machines, leveraging modern multi-core CPUs (e.g., Intel Xeon) and NVIDIA GPUs (e.g., RTX series)</span>
           </div>
         </div>
         <div class="info-card full">
@@ -510,7 +510,7 @@
         <p><strong>Read path:</strong> A <code>get(key)</code> searches the active memtable, then the immutable memtable, then L0 SSTables (newest first), then deeper levels via binary search. The first match found is the most recent value.</p>
 
         <h3>GPU Merge Path Algorithm</h3>
-        <p>Our CUDA merge kernel uses the Merge Path algorithm [1] with a two-phase approach to maximize GPU memory throughput:</p>
+        <p>Our CUDA merge kernel uses the Merge Path algorithm [1][2] with a two-phase approach to maximize GPU memory throughput:</p>
         <p><strong>Phase 1 — Coarse-grained partitioning (Global Memory):</strong> Each CUDA block is responsible for producing a fixed-size segment (e.g., 1024 elements) of the merged output. Block <em>i</em>'s first thread performs a binary search along the <em>i</em>-th cross-diagonal of the merge matrix to find the partition boundary — the exact (a<sub>i</sub>, b<sub>i</sub>) positions in both input arrays where this block's work begins. This is O(log N) per block.</p>
         <p><strong>Phase 2 — Fine-grained merging (Shared Memory):</strong> All threads in the block cooperatively load their input segments from Global Memory into Shared Memory (coalesced reads). Each thread then performs a local merge path binary search within Shared Memory to determine its individual output elements, and writes the merged result back to Shared Memory. Finally, all threads cooperatively write the sorted segment back to Global Memory (coalesced writes). Operating in Shared Memory avoids the latency of repeated Global Memory accesses and enables coalesced access patterns throughout.</p>
 
@@ -538,9 +538,11 @@
 
         <h3>References</h3>
         <p>[1] Odeh, Green, Miklau. "Merge Path — A Visually Intuitive Approach to Parallel Merging." IEEE IPDPS, 2012.<br>
-        [2] O'Neil et al. "The Log-Structured Merge-Tree (LSM-Tree)." Acta Informatica, 1996.<br>
-        [3] Dong et al. "Optimizing Space Amplification in RocksDB." CIDR, 2017. (Leveled vs Size-Tiered tradeoffs)<br>
-        [4] Cooper et al. "Benchmarking Cloud Serving Systems with YCSB." SoCC, 2010.</p>
+        [2] Green, McColl, Bader. "GPU Merge Path — A GPU Merging Algorithm." ICS, 2012. (CUDA shared memory two-phase implementation)<br>
+        [3] O'Neil et al. "The Log-Structured Merge-Tree (LSM-Tree)." Acta Informatica, 1996.<br>
+        [4] Luo, Carey. "LSM-based Storage Techniques: A Survey." VLDB Journal, 2020. (Size-Tiered vs Leveled compaction trade-offs)<br>
+        [5] Dong et al. "Optimizing Space Amplification in RocksDB." CIDR, 2017.<br>
+        [6] Cooper et al. "Benchmarking Cloud Serving Systems with YCSB." SoCC, 2010.</p>
 
         <h2>Goals and Deliverables</h2>
         <h3>Plan to Achieve (MVP)</h3>
