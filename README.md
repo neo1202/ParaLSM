@@ -1,31 +1,34 @@
 # ParaLSM
 
-A GPU-accelerated in-memory LSM-Tree key-value store with CUDA, OpenMP, and SIMD parallelism.
+A GPU-accelerated in-memory LSM-Tree key-value store with Size-Tiered Compaction, CUDA Merge Path, and OpenMP concurrency.
 
 **CMU 15-418/618 Final Project, Spring 2026**
 
-**Team:** [Your Name], [Partner Name]
+**Team:** Hua-Yo Wu(huayow), Pi-Jung Chang(pijungc)
 
-**[Project Page](https://YOUR_USERNAME.github.io/ParaLSM/)**
+**[Project Page](https://neo1202.github.io/ParaLSM/)**
 
 ---
 
 ## Overview
 
-ParaLSM is an in-memory LSM-Tree that parallelizes compaction (sorted array merge) using CUDA merge path, serves concurrent read/write requests via OpenMP thread pools, and accelerates key comparisons with AVX2 SIMD intrinsics.
+ParaLSM is an in-memory LSM-Tree using **Size-Tiered Compaction** that parallelizes compaction via **CUDA Merge Path** (two-phase: Global Memory partitioning + Shared Memory merging) with **chunk-based pipelining** to hide PCIe latency, and serves concurrent read/write requests via **OpenMP** task scheduling.
 
-All data lives in memory — no disk I/O — so we can isolate and measure pure computational parallelism.
+Size-Tiered compaction produces exponentially growing SSTables at deeper levels, providing the large, contiguous merge workloads that maximize GPU throughput. All data lives in pre-allocated memory pools — no disk I/O, no runtime allocation — so we isolate and measure pure computational parallelism.
 
 ## Architecture
 
 ```
-CPU (8 cores)                          GPU (RTX 2080)
-┌────────────────────────────┐         ┌─────────────────────┐
-│ Core 0-5: OpenMP thread    │         │ Stream 0: merge     │
-│   pool (get/put requests)  │         │ Stream 1: merge     │
-│ Core 6: flush thread       │         │ Stream 2: transfer  │
-│ Core 7: compaction dispatch├────────►│                     │
-└────────────────────────────┘         └─────────────────────┘
+CPU (8 cores) — OpenMP Tasks             GPU (RTX 2080) — Chunk Pipeline
+┌──────────────────────────────┐         ┌───────────────────────────┐
+│ Task pool (dynamic):         │         │ Cascaded 2-way merge:     │
+│   ├── get/put requests       │         │   Stream 0: merge A+B     │
+│   ├── flush (memtable→SST)   │         │   Stream 1: merge C+D     │
+│   └── compaction dispatch ───┼────────►│   Stream 2: merge AB+CD   │
+│                              │         │                           │
+│ Co-rank partitioning (CPU)   │         │ Each stream: overlap      │
+│ Pinned memory buffers        │         │   H2D / Kernel / D2H      │
+└──────────────────────────────┘         └───────────────────────────┘
 ```
 
 ## Building
@@ -38,10 +41,10 @@ make -j$(nproc)
 
 ### Dependencies
 
-- C++17 compiler (g++ 9+)
+- C++20 compiler (g++ 10+)
 - CUDA Toolkit 11+
 - OpenMP
-- CPU with AVX2 support
+- (Stretch) CPU with AVX2 support
 
 ## Usage
 
@@ -58,21 +61,22 @@ make -j$(nproc)
 
 ```
 ParaLSM/
-├── docs/              # GitHub Pages project website
+├── docs/               # GitHub Pages project website
 │   └── index.html
 ├── src/
-│   ├── memtable.h     # Active + immutable memtable
-│   ├── sstable.h      # Sorted array (in-memory SSTable)
-│   ├── lsm_tree.h     # Core LSM-Tree logic
-│   ├── version.h      # Lock-free version snapshot
-│   ├── merge.h         # Serial merge baseline
-│   ├── merge.cu        # CUDA merge path kernel
-│   └── merge_simd.h    # AVX2 merge + comparison
+│   ├── memtable.h      # Active + immutable memtable
+│   ├── sstable.h       # Sorted array (in-memory SSTable)
+│   ├── lsm_tree.h      # Core LSM-Tree logic (size-tiered compaction)
+│   ├── version.h       # Atomic version snapshot (std::atomic<shared_ptr>)
+│   ├── memory_pool.h   # Pre-allocated host/device memory pools
+│   ├── merge.h          # Serial merge baseline
+│   ├── merge.cu         # CUDA merge path kernel (shared memory two-phase)
+│   └── pipeline.cu      # Chunk-based pipeline with Co-rank partitioning
 ├── bench/
-│   ├── bench_merge.cpp # Merge micro-benchmark
-│   └── bench_system.cpp# End-to-end workload benchmark
+│   ├── bench_merge.cpp  # Merge micro-benchmark (H2D/kernel/D2H breakdown)
+│   └── bench_system.cpp # End-to-end YCSB-style workload benchmark
 ├── test/
-│   └── test_lsm.cpp   # Correctness tests
+│   └── test_lsm.cpp    # Correctness tests
 ├── CMakeLists.txt
 ├── .gitignore
 └── README.md
