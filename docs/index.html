@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parallel In-Memory LSM-Tree</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0e1117;
+    --surface: #161b22;
+    --surface-2: #1c2129;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f3a5f;
+    --green: #3fb950;
+    --green-dim: #1a3a2a;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Source Serif 4', Georgia, serif;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  .site-header {
+    border-bottom: 1px solid var(--border);
+    padding: 2rem 0;
+    background: linear-gradient(180deg, #131820 0%, var(--bg) 100%);
+  }
+
+  .container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 0 2rem;
+  }
+
+  .header-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+  }
+
+  .project-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+
+  .project-subtitle {
+    font-size: 0.95rem;
+    color: var(--text-dim);
+    margin-top: 0.3rem;
+  }
+
+  .course-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem;
+    color: var(--accent);
+    background: var(--accent-dim);
+    padding: 0.25rem 0.6rem;
+    border-radius: 4px;
+    letter-spacing: 0.02em;
+  }
+
+  .github-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    text-decoration: none;
+    transition: border-color 0.2s, background 0.2s;
+  }
+
+  .github-btn:hover {
+    border-color: var(--accent);
+    background: var(--surface-2);
+  }
+
+  .github-btn svg { width: 18px; height: 18px; fill: var(--text); }
+
+  /* ── Tabs ── */
+  .tabs-container {
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0;
+    overflow-x: auto;
+  }
+
+  .tab {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    padding: 0.85rem 1.25rem;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.2s, border-color 0.2s;
+    white-space: nowrap;
+    user-select: none;
+    background: none;
+    border-top: none;
+    border-left: none;
+    border-right: none;
+  }
+
+  .tab:hover { color: var(--text); }
+
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  /* ── Content ── */
+  .content { padding: 2.5rem 0 4rem; }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ── Overview panel ── */
+  .overview-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1.5rem;
+  }
+
+  @media (max-width: 640px) { .overview-grid { grid-template-columns: 1fr; } }
+
+  .info-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+  }
+
+  .info-card.full { grid-column: 1 / -1; }
+
+  .card-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 0.5rem;
+  }
+
+  .card-value {
+    font-size: 1rem;
+    color: var(--text);
+  }
+
+  .tech-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+  }
+
+  .badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 4px;
+    border: 1px solid;
+  }
+
+  .badge.cuda { color: var(--green); border-color: var(--green-dim); background: rgba(63,185,80,0.08); }
+  .badge.openmp { color: var(--accent); border-color: var(--accent-dim); background: rgba(88,166,255,0.08); }
+  .badge.simd { color: var(--purple); border-color: #3b2d5e; background: rgba(188,140,255,0.08); }
+  .badge.cpp { color: var(--orange); border-color: #3d2e10; background: rgba(210,153,34,0.08); }
+
+  .arch-diagram {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-top: 1.5rem;
+    overflow-x: auto;
+  }
+
+  .arch-diagram pre {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text-dim);
+  }
+
+  /* ── Markdown-style content ── */
+  .prose h2 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text);
+    margin-top: 2.5rem;
+    margin-bottom: 0.75rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .prose h2:first-child { margin-top: 0; }
+
+  .prose h3 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-top: 1.8rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .prose p {
+    margin-bottom: 1rem;
+    color: var(--text);
+    font-size: 0.95rem;
+  }
+
+  .prose ul, .prose ol {
+    margin-bottom: 1rem;
+    padding-left: 1.5rem;
+  }
+
+  .prose li {
+    margin-bottom: 0.4rem;
+    font-size: 0.95rem;
+  }
+
+  .prose strong { color: var(--text); font-weight: 600; }
+
+  .prose code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82rem;
+    background: var(--surface-2);
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+    color: var(--accent);
+  }
+
+  .prose pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1.25rem;
+    overflow-x: auto;
+    margin-bottom: 1rem;
+  }
+
+  .prose pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  .prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1.5rem;
+    font-size: 0.88rem;
+  }
+
+  .prose th {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    text-align: left;
+    padding: 0.6rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .prose td {
+    padding: 0.55rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  .prose tr:last-child td { border-bottom: none; }
+
+  /* ── Status badges ── */
+  .status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    padding: 0.15rem 0.45rem;
+    border-radius: 3px;
+  }
+
+  .status.done { color: var(--green); background: var(--green-dim); }
+  .status.wip { color: var(--orange); background: #3d2e10; }
+  .status.todo { color: var(--text-dim); background: var(--surface-2); }
+
+  /* ── Placeholder panel ── */
+  .placeholder {
+    text-align: center;
+    padding: 4rem 2rem;
+    color: var(--text-dim);
+  }
+
+  .placeholder-icon {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+    opacity: 0.4;
+  }
+
+  .placeholder p {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+  }
+
+  /* ── Footer ── */
+  .site-footer {
+    border-top: 1px solid var(--border);
+    padding: 1.5rem 0;
+    text-align: center;
+  }
+
+  .site-footer p {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+
+<!-- ════════ HEADER ════════ -->
+<header class="site-header">
+  <div class="container">
+    <div class="header-content">
+      <div>
+        <div class="project-title">Parallel In-Memory LSM-Tree</div>
+        <div class="project-subtitle">GPU-accelerated compaction &amp; concurrent key-value store</div>
+        <div style="margin-top: 0.6rem;">
+          <span class="course-tag">15-418/618 Spring 2026</span>
+        </div>
+      </div>
+      <a href="https://github.com/YOUR_USERNAME/YOUR_REPO" target="_blank" class="github-btn">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        Source Code
+      </a>
+    </div>
+  </div>
+</header>
+
+<!-- ════════ TABS ════════ -->
+<nav class="tabs-container">
+  <div class="container">
+    <div class="tabs">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="proposal">Proposal</button>
+      <button class="tab" data-tab="milestone">Milestone</button>
+      <button class="tab" data-tab="report">Final Report</button>
+    </div>
+  </div>
+</nav>
+
+<!-- ════════ CONTENT ════════ -->
+<main class="content">
+  <div class="container">
+
+    <!-- ──── OVERVIEW ──── -->
+    <div class="tab-panel active" id="overview">
+      <div class="prose">
+        <p>We build an in-memory LSM-Tree key-value store and parallelize it across three levels: GPU-accelerated compaction (CUDA merge path), multi-threaded concurrent operations (OpenMP), and SIMD-accelerated key comparisons (AVX2). By keeping all data in memory, we eliminate disk I/O variability and focus on characterizing the speedup contribution of each technique under different workloads.</p>
+      </div>
+
+      <div class="overview-grid">
+        <div class="info-card">
+          <div class="card-label">Team</div>
+          <div class="card-value">
+            [Your Name]<br>[Partner Name]
+          </div>
+        </div>
+        <div class="info-card">
+          <div class="card-label">Platform</div>
+          <div class="card-value">
+            GHC machines<br>
+            <span style="color: var(--text-dim); font-size: 0.85rem;">i7-9700 (8 cores) · RTX 2080 · 16 GB RAM</span>
+          </div>
+        </div>
+        <div class="info-card full">
+          <div class="card-label">Technologies</div>
+          <div class="tech-badges">
+            <span class="badge cpp">C++</span>
+            <span class="badge cuda">CUDA</span>
+            <span class="badge openmp">OpenMP</span>
+            <span class="badge simd">AVX2 / SIMD</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="arch-diagram">
+        <div class="card-label" style="margin-bottom: 0.75rem;">System Architecture</div>
+<pre>
+                 ┌──────────────────────────────────────────┐
+   Requests      │              CPU (8 cores)               │
+  ───────────►   │                                          │
+                 │  Core 0-5: OpenMP thread pool             │
+                 │    ├── get(key) ──► version snapshot      │
+                 │    │                 ├── check memtable   │
+                 │    │                 └── check L0..Ln     │
+                 │    └── put(key,val) ──► active memtable   │
+                 │                                          │
+                 │  Core 6: flush thread (double buffering)  │
+                 │  Core 7: compaction dispatcher ───────────┼──► GPU
+                 └──────────────────────────────────────────┘
+                                                     │
+                 ┌──────────────────────────────────────────┐
+                 │             GPU (RTX 2080)                │
+                 │  Stream 0: merge path kernel (job A)      │
+                 │  Stream 1: merge path kernel (job B)      │
+                 │  Stream 2: overlapped data transfer       │
+                 └──────────────────────────────────────────┘
+</pre>
+      </div>
+
+      <div style="margin-top: 2rem;">
+        <div class="card-label" style="margin-bottom: 0.75rem;">Project Timeline</div>
+        <table class="prose" style="margin: 0;">
+          <thead>
+            <tr>
+              <th>Week</th>
+              <th>Task</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="white-space:nowrap;">Week 1 <span style="color:var(--text-dim); font-size:0.8rem;">(3/23–3/29)</span></td>
+              <td>Serial LSM-Tree baseline + proposal</td>
+              <td><span class="status wip">in progress</span></td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 2 <span style="color:var(--text-dim); font-size:0.8rem;">(3/30–4/5)</span></td>
+              <td>OpenMP concurrency + benchmark framework</td>
+              <td><span class="status todo">todo</span></td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 3 <span style="color:var(--text-dim); font-size:0.8rem;">(4/6–4/12)</span></td>
+              <td>CUDA merge path + SIMD key comparison</td>
+              <td><span class="status todo">todo</span></td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 4 <span style="color:var(--text-dim); font-size:0.8rem;">(4/13–4/19)</span></td>
+              <td>Milestone report + profiling + optimization</td>
+              <td><span class="status todo">todo</span></td>
+            </tr>
+            <tr>
+              <td style="white-space:nowrap;">Week 5-6 <span style="color:var(--text-dim); font-size:0.8rem;">(4/20–4/30)</span></td>
+              <td>Full benchmarks + final report + poster</td>
+              <td><span class="status todo">todo</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ──── PROPOSAL ──── -->
+    <div class="tab-panel" id="proposal">
+      <div class="prose">
+
+        <h2>Summary</h2>
+        <p>We will build an in-memory LSM-Tree key-value store and parallelize it across three levels: GPU-accelerated compaction via CUDA merge path, multi-threaded concurrent operations via OpenMP, and SIMD-accelerated key comparisons via AVX2. By keeping all data in memory, we eliminate disk I/O variability and isolate the computational parallelism of a real storage engine's critical path. Our primary goal is to characterize the speedup contribution of each parallelization technique under different workload patterns.</p>
+
+        <h2>Background</h2>
+        <h3>What is an LSM-Tree?</h3>
+        <p>An LSM-Tree (Log-Structured Merge Tree) is a write-optimized key-value store used in systems like RocksDB, LevelDB, and Cassandra. It converts all writes into sequential sorted batches, achieving high write throughput at the cost of slightly slower reads.</p>
+
+        <p><strong>Write path:</strong> All <code>put(key, value)</code> operations insert into a sorted in-memory structure (the <em>active memtable</em>). When the memtable reaches a size threshold, it freezes into an <em>immutable memtable</em>, a new active memtable is created, and a background thread flushes the immutable memtable as a sorted array ("SSTable") into Level 0.</p>
+
+        <p><strong>Compaction:</strong> SSTables accumulate across levels (L0, L1, L2, ...), where each level's capacity is ~10x the previous. When a level exceeds its limit, selected SSTables are merged with overlapping SSTables in the next level via sorted merge. This is the most compute-intensive operation.</p>
+
+        <p><strong>Read path:</strong> A <code>get(key)</code> searches the active memtable, then the immutable memtable, then L0 SSTables (newest first), then deeper levels via binary search. The first match found is the most recent value.</p>
+
+        <h3>Why is this suitable for parallelism?</h3>
+        <p>Compaction is essentially a multi-way merge of large sorted arrays — a highly data-parallel operation. Reads are independent across levels and across requests. Flush, compaction, and request serving can be pipelined across CPU cores and GPU simultaneously. The immutability of SSTables means most reads are conflict-free.</p>
+
+        <h3>In-Memory Design</h3>
+        <p>Our implementation keeps all data in memory: SSTables are <code>std::vector&lt;KeyValue&gt;</code> rather than on-disk files. "Flush" copies sorted data from memtable to a vector; "compaction" merges vectors. This eliminates disk I/O as a confounding variable and lets us measure pure computational parallelism.</p>
+
+        <h2>The Challenge</h2>
+        <p><strong>Workload characteristics:</strong> Compaction involves merging large sorted arrays. Serial merge is inherently sequential (each output depends on the previous comparison), requiring algorithmic restructuring (merge path) to parallelize. Memory access patterns differ across operations: compaction is sequential (good locality), point lookups are random (poor locality), and concurrent operations contend for shared metadata.</p>
+
+        <p><strong>System-level concurrency:</strong> Background compaction modifies the level structure (replacing old SSTables with merged ones) while foreground threads read from those same SSTables. We address this with version-based snapshot isolation: each reader captures an atomic snapshot of the current level layout before querying. Compaction atomically swaps in a new version via <code>shared_ptr</code> + <code>atomic_store</code>. Old versions remain valid until all readers release them.</p>
+
+        <p><strong>GPU offloading tradeoffs:</strong> For small SSTables, host-device transfer time dominates kernel execution time, making GPU slower than CPU. Characterizing this crossover point and implementing adaptive offloading is a key challenge.</p>
+
+        <p><strong>Load imbalance:</strong> In leveled compaction, the amount of work per compaction job varies significantly depending on key range overlap between levels. Naive static assignment may leave some threads idle while others are overloaded.</p>
+
+        <h2>Resources</h2>
+        <p><strong>Hardware:</strong> GHC machines — Intel i7-9700 (8 cores), NVIDIA RTX 2080 GPU, 16 GB RAM, AVX2 support. PSC machines if needed for scalability experiments.</p>
+        <p><strong>Software:</strong> C++, CUDA toolkit, OpenMP, AVX2 intrinsics.</p>
+        <p><strong>Code base:</strong> Starting from scratch — no existing codebase.</p>
+
+        <h3>References</h3>
+        <p>[1] Odeh, Green, Miklau. "Merge Path — A Visually Intuitive Approach to Parallel Merging." IEEE IPDPS, 2012.<br>
+        [2] O'Neil et al. "The Log-Structured Merge-Tree (LSM-Tree)." Acta Informatica, 1996.<br>
+        [3] Dong et al. "Optimizing Space Amplification in RocksDB." CIDR, 2017.<br>
+        [4] Cooper et al. "Benchmarking Cloud Serving Systems with YCSB." SoCC, 2010.</p>
+
+        <h2>Goals and Deliverables</h2>
+        <h3>Plan to Achieve (MVP)</h3>
+        <ol>
+          <li><strong>Serial baseline:</strong> Complete in-memory LSM-Tree with <code>put</code>, <code>get</code>, <code>scan</code>, leveled compaction, and correctness tests.</li>
+          <li><strong>CUDA merge path:</strong> GPU-accelerated two-way sorted merge for compaction. Micro-benchmark comparing serial vs CUDA merge across input sizes (100K–50M entries), with time breakdown into transfer, kernel, and transfer back.</li>
+          <li><strong>OpenMP concurrent operations:</strong> Thread pool serving parallel <code>get</code>/<code>put</code> requests via work queue. Pipelined flush and compaction in background threads.</li>
+          <li><strong>Version-based concurrency control:</strong> Atomic version snapshot using <code>shared_ptr</code> + <code>atomic_store</code>, ensuring readers are never blocked by compaction.</li>
+          <li><strong>End-to-end evaluation:</strong> YCSB-style workloads (write-heavy, read-heavy, mixed) comparing serial vs parallel throughput. Speedup analysis with Amdahl's Law breakdown.</li>
+        </ol>
+
+        <h3>Hope to Achieve (Stretch Goals)</h3>
+        <ol start="6">
+          <li>Adaptive CPU/GPU compaction: runtime offloading decision based on SSTable size.</li>
+          <li>SIMD key comparison (AVX2) in merge inner loop and binary search.</li>
+          <li>Multi-way merge on GPU for L0 compaction (k-way via CUDA streams).</li>
+          <li>Software prefetching for level traversal and merge operations.</li>
+          <li>CUDA streams for overlapping data transfer with kernel execution.</li>
+        </ol>
+
+        <h3>Fallback Plan</h3>
+        <p>If GPU merge path proves too complex, we fall back to OpenMP-only parallelism: concurrent reads, CPU-parallel merge using OpenMP threads with binary-search partitioning, and pipelined flush. This still covers multiple 15-418 topics (work distribution, synchronization, locality) and provides meaningful speedup analysis.</p>
+
+        <h2>Platform Choice</h2>
+        <p>GHC machines provide the combination of multi-core CPU, NVIDIA GPU, and AVX2 support needed to explore all three levels of parallelism. We chose C++ for low-level control over memory layout and SIMD intrinsics. We use OpenMP over MPI because our workload is shared-memory, and CUDA for GPU compute with nvprof/nsight for profiling.</p>
+
+        <h2>Evaluation Plan</h2>
+        <h3>Micro-Benchmarks</h3>
+        <table>
+          <thead><tr><th>Benchmark</th><th>Configurations</th><th>Key Metric</th></tr></thead>
+          <tbody>
+            <tr><td>Sorted merge</td><td>Serial vs OpenMP (2,4,8 threads) vs CUDA, n = 100K–50M</td><td>Speedup, GPU time breakdown</td></tr>
+            <tr><td>Point lookup</td><td>1–16 threads, scalar vs SIMD binary search</td><td>Throughput (lookups/sec)</td></tr>
+            <tr><td>Key comparison</td><td>Scalar vs AVX2, key sizes 8B/16B/32B</td><td>Comparisons/sec</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Macro-Benchmarks</h3>
+        <table>
+          <thead><tr><th>Workload</th><th>Read/Write</th><th>Purpose</th></tr></thead>
+          <tbody>
+            <tr><td>Write-heavy</td><td>5% / 95%</td><td>Stress compaction</td></tr>
+            <tr><td>Read-heavy</td><td>95% / 5%</td><td>Stress concurrent lookup</td></tr>
+            <tr><td>Mixed</td><td>50% / 50%</td><td>Realistic workload</td></tr>
+          </tbody>
+        </table>
+        <p>Each workload: 10M operations, uniform random keys, key = 8B int64, value = 8B int64.</p>
+
+        <h2>Schedule</h2>
+        <table>
+          <thead><tr><th>Week</th><th>Dates</th><th>Tasks</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>3/23–3/29</td><td>Serial LSM-Tree: memtable, SSTable, leveled compaction, put/get/scan. Correctness tests. Submit proposal.</td></tr>
+            <tr><td>2</td><td>3/30–4/5</td><td>OpenMP thread pool + work queue. Background flush with double buffering. Version snapshot. Benchmark framework.</td></tr>
+            <tr><td>3</td><td>4/6–4/12</td><td>CUDA merge path kernel. Host-device transfer pipeline. Merge micro-benchmark. Begin SIMD.</td></tr>
+            <tr><td>4</td><td>4/13–4/19</td><td>Milestone report (due 4/14). Profile with nvprof/perf. Adaptive CPU/GPU offloading.</td></tr>
+            <tr><td>5–6</td><td>4/20–4/30</td><td>Full macro-benchmark suite. Speedup curves. Final report + poster.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ──── MILESTONE ──── -->
+    <div class="tab-panel" id="milestone">
+      <div class="placeholder">
+        <div class="placeholder-icon">&#9671;</div>
+        <p>Milestone report will be posted here after April 14th.</p>
+      </div>
+    </div>
+
+    <!-- ──── FINAL REPORT ──── -->
+    <div class="tab-panel" id="report">
+      <div class="placeholder">
+        <div class="placeholder-icon">&#9671;</div>
+        <p>Final report will be posted here after April 30th.</p>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>15-418/618 Parallel Computer Architecture and Programming · Carnegie Mellon University · Spring 2026</p>
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  // Allow linking to tabs via hash
+  if (window.location.hash) {
+    const target = window.location.hash.slice(1);
+    const tab = document.querySelector(`[data-tab="${target}"]`);
+    if (tab) tab.click();
+  }
+</script>
+
+</body>
+</html>
